@@ -5,7 +5,6 @@ from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Any
 import pandas as pd
 import joblib
-import numpy as np
 from datetime import datetime
 import logging
 import os
@@ -151,7 +150,7 @@ def load_models():
     try:
         model_dir = os.getenv("MODEL_DIR", "./models")
 
-        model_path = os.path.join(model_dir, "price_prediction_rf_model.pkl")
+        model_path = os.path.join(model_dir, "price_prediction_m1.pkl")
         encoder_path = os.path.join(model_dir, "encoder.pkl")
         scaler_path = os.path.join(model_dir, "scaler.pkl")
 
