@@ -1,13 +1,14 @@
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import pandas as pd
 import joblib
 from datetime import datetime
 import logging
 import os
+import json
 from contextlib import asynccontextmanager
 
 # Configure logging
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 model = None
 encoder = None
 scaler = None
+model_metrics = None  # ← Added for MAE metrics
 
 
 # Pydantic Models
@@ -76,6 +78,8 @@ class PredictionResponse(BaseModel):
     price_per_square_meter: float
     currency: str = "EUR"
     success: bool = True
+    mean_absolute_error_eur: Optional[float] = Field(None, description="Model's MAE in EUR")
+    mae_percentage: Optional[float] = Field(None, description="Model's MAE as percentage")
     model_info: Dict[str, Any]
     property_summary: Optional[Dict[str, Any]] = None
 
@@ -89,6 +93,9 @@ class BatchPredictionResponse(BaseModel):
     results: List[Dict[str, Any]]
     errors: List[Dict[str, Any]]
     timestamp: str
+    # Model accuracy metrics for batch
+    mean_absolute_error_eur: Optional[float] = None
+    mae_percentage: Optional[float] = None
 
 
 class HealthResponse(BaseModel):
@@ -108,6 +115,9 @@ class ModelInfoResponse(BaseModel):
     n_features: Optional[int]
     supported_municipalities: List[str]
     feature_categories: Dict[str, List[str]]
+    # Model accuracy metrics
+    mean_absolute_error_eur: Optional[float] = None
+    mae_percentage: Optional[float] = None
     service_info: Dict[str, str]
 
 
@@ -145,7 +155,7 @@ app.add_middleware(
 
 def load_models():
     """Load trained models and preprocessors"""
-    global model, encoder, scaler
+    global model, encoder, scaler, model_metrics
 
     try:
         model_dir = os.getenv("MODEL_DIR", "./models")
@@ -153,6 +163,7 @@ def load_models():
         model_path = os.path.join(model_dir, "price_prediction_m1.pkl")
         encoder_path = os.path.join(model_dir, "encoder.pkl")
         scaler_path = os.path.join(model_dir, "scaler.pkl")
+        metrics_path = os.path.join(model_dir, "model_metrics.pkl")
 
         logger.info(f"Loading models from: {model_dir}")
 
@@ -160,13 +171,25 @@ def load_models():
         encoder = joblib.load(encoder_path)
         scaler = joblib.load(scaler_path)
 
+        # Load metrics if available
+        if os.path.exists(metrics_path):
+            model_metrics = joblib.load(metrics_path)
+            logger.info("✅ Model metrics loaded successfully")
+            logger.info(
+                f"   MAE: {model_metrics.get('mean_absolute_error_eur')} EUR "
+                f"({model_metrics.get('mae_percentage')}%)"
+            )
+        else:
+            logger.warning("⚠️  Model metrics file not found. MAE will not be included in responses.")
+            model_metrics = None
+
         logger.info("✅ Models loaded successfully")
         logger.info(f"   Model type: {type(model).__name__}")
         logger.info(f"   Features: {model.n_features_in_}")
 
     except Exception as e:
         logger.error(f"❌ Error loading models: {e}")
-        model = encoder = scaler = None
+        model = encoder = scaler = model_metrics = None
 
 
 def preprocess_property_data(property_data: PropertyData) -> pd.DataFrame:
@@ -264,7 +287,8 @@ async def predict_price(property_data: PropertyData):
     """
     Predict property price based on features
 
-    Returns predicted price in EUR with price per square meter
+    Returns predicted price in EUR with price per square meter.
+    Also includes the model's Mean Absolute Error for accuracy reference.
     """
 
     if not all([model, encoder, scaler]):
@@ -286,21 +310,21 @@ async def predict_price(property_data: PropertyData):
             f"in {property_data.municipality}"
         )
 
+        # Build response with MAE metrics
         return PredictionResponse(
             predicted_price=round(predicted_price, 2),
             price_per_square_meter=round(price_per_square, 2),
             currency="EUR",
             success=True,
+            # Include MAE metrics if available
+            mean_absolute_error_eur=model_metrics.get('mean_absolute_error_eur') if model_metrics else None,
+            mae_percentage=model_metrics.get('mae_percentage') if model_metrics else None,
             model_info={
-                "model_type": "RandomForestRegressor",
+                "model_type": type(model).__name__,
                 "features_used": len(processed_data.columns),
                 "prediction_timestamp": datetime.now().isoformat(),
-                "service": "FastAPI"
-            },
-            property_summary={
-                "municipality": property_data.municipality,
-                "area": property_data.area,
-                "rooms": property_data.number_of_rooms
+                "service": "FastAPI",
+                "trained_on": model_metrics.get('trained_on') if model_metrics else None
             }
         )
 
@@ -364,7 +388,10 @@ async def predict_batch(batch_data: BatchPropertyData):
         failed_predictions=len(errors),
         results=results,
         errors=errors,
-        timestamp=datetime.now().isoformat()
+        timestamp=datetime.now().isoformat(),
+        # Include MAE metrics
+        mean_absolute_error_eur=model_metrics.get('mean_absolute_error_eur') if model_metrics else None,
+        mae_percentage=model_metrics.get('mae_percentage') if model_metrics else None
     )
 
 
@@ -382,11 +409,14 @@ async def get_model_info():
         supported_municipalities = encoder.categories_[0].tolist()
 
         return ModelInfoResponse(
-            model_type="RandomForestRegressor",
+            model_type=type(model).__name__,
             n_estimators=getattr(model, 'n_estimators', None),
             max_depth=getattr(model, 'max_depth', None),
             n_features=getattr(model, 'n_features_in_', None),
             supported_municipalities=supported_municipalities,
+            # Include MAE metrics
+            mean_absolute_error_eur=model_metrics.get('mean_absolute_error_eur') if model_metrics else None,
+            mae_percentage=model_metrics.get('mae_percentage') if model_metrics else None,
             feature_categories={
                 "categorical": ["municipality"],
                 "numerical": ["area", "number_of_rooms", "year", "month", "weekday"],
