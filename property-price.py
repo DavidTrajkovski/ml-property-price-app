@@ -9,6 +9,7 @@ from datetime import datetime
 import logging
 import os
 import json
+import numpy as np
 from contextlib import asynccontextmanager
 
 # Configure logging
@@ -18,11 +19,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global variables for models
+# Global variables
 model = None
 encoder = None
 scaler = None
-model_metrics = None  # ← Added for MAE metrics
+model_metrics = None
 
 
 # Pydantic Models
@@ -32,7 +33,6 @@ class PropertyData(BaseModel):
     area: float = Field(..., gt=0, description="Property area in square meters")
     number_of_rooms: int = Field(..., ge=1, description="Number of rooms")
 
-    # Binary features (0 or 1) - using aliases for Cyrillic names
     balkon_terasa: int = Field(0, alias="Балкон / Тераса", ge=0, le=1)
     lift: int = Field(0, alias="Лифт", ge=0, le=1)
     prizemje: int = Field(0, alias="Приземје", ge=0, le=1)
@@ -67,25 +67,28 @@ class PropertyData(BaseModel):
         }
 
 
-class BatchPropertyData(BaseModel):
-    """Batch prediction request model"""
-    properties: List[PropertyData] = Field(..., max_length=100)
-
-
 class PredictionResponse(BaseModel):
-    """Response model for price prediction"""
+    """Response model with variable confidence metrics"""
     predicted_price: float
     price_per_square_meter: float
     currency: str = "EUR"
     success: bool = True
-    mean_absolute_error_eur: Optional[float] = Field(None, description="Model's MAE in EUR")
-    mae_percentage: Optional[float] = Field(None, description="Model's MAE as percentage")
+
+    # Variable confidence metrics (changes per request)
+    prediction_confidence: Dict[str, Any]  # ← NEW: Variable confidence
+
+    # Fixed model accuracy (from training)
+    model_accuracy: Dict[str, Any]  # ← Renamed from separate fields
+
     model_info: Dict[str, Any]
     property_summary: Optional[Dict[str, Any]] = None
 
 
+class BatchPropertyData(BaseModel):
+    properties: List[PropertyData] = Field(..., max_length=100)
+
+
 class BatchPredictionResponse(BaseModel):
-    """Response model for batch predictions"""
     success: bool
     total_properties: int
     successful_predictions: int
@@ -93,13 +96,11 @@ class BatchPredictionResponse(BaseModel):
     results: List[Dict[str, Any]]
     errors: List[Dict[str, Any]]
     timestamp: str
-    # Model accuracy metrics for batch
     mean_absolute_error_eur: Optional[float] = None
     mae_percentage: Optional[float] = None
 
 
 class HealthResponse(BaseModel):
-    """Health check response model"""
     status: str
     timestamp: str
     model_loaded: bool
@@ -108,32 +109,28 @@ class HealthResponse(BaseModel):
 
 
 class ModelInfoResponse(BaseModel):
-    """Model information response"""
     model_type: str
     n_estimators: Optional[int]
     max_depth: Optional[int]
     n_features: Optional[int]
     supported_municipalities: List[str]
     feature_categories: Dict[str, List[str]]
-    # Model accuracy metrics
     mean_absolute_error_eur: Optional[float] = None
     mae_percentage: Optional[float] = None
+    trained_on: Optional[str] = None
+    training_samples: Optional[int] = None
+    test_samples: Optional[int] = None
     service_info: Dict[str, str]
 
 
-# Lifespan context manager for startup/shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load models on startup, cleanup on shutdown"""
-    # Startup
     logger.info("Starting FastAPI ML Service...")
     load_models()
     yield
-    # Shutdown
     logger.info("Shutting down FastAPI ML Service...")
 
 
-# Initialize FastAPI app
 app = FastAPI(
     title="Property Price Prediction API",
     description="FastAPI ML service for predicting property prices in Skopje, North Macedonia",
@@ -143,10 +140,9 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -154,7 +150,6 @@ app.add_middleware(
 
 
 def load_models():
-    """Load trained models and preprocessors"""
     global model, encoder, scaler, model_metrics
 
     try:
@@ -171,16 +166,13 @@ def load_models():
         encoder = joblib.load(encoder_path)
         scaler = joblib.load(scaler_path)
 
-        # Load metrics if available
         if os.path.exists(metrics_path):
             model_metrics = joblib.load(metrics_path)
             logger.info("✅ Model metrics loaded successfully")
             logger.info(
-                f"   MAE: {model_metrics.get('mean_absolute_error_eur')} EUR "
-                f"({model_metrics.get('mae_percentage')}%)"
-            )
+                f"   MAE: {model_metrics.get('mean_absolute_error_eur')} EUR ({model_metrics.get('mae_percentage')}%)")
         else:
-            logger.warning("⚠️  Model metrics file not found. MAE will not be included in responses.")
+            logger.warning("⚠️  Model metrics file not found")
             model_metrics = None
 
         logger.info("✅ Models loaded successfully")
@@ -194,8 +186,6 @@ def load_models():
 
 def preprocess_property_data(property_data: PropertyData) -> pd.DataFrame:
     """Preprocess property data for prediction"""
-
-    # Convert to dict and then DataFrame
     data_dict = {
         'municipality': property_data.municipality,
         'area': property_data.area,
@@ -215,36 +205,79 @@ def preprocess_property_data(property_data: PropertyData) -> pd.DataFrame:
 
     df = pd.DataFrame([data_dict])
 
-    # Add date features
     current_date = datetime.now()
     df['year'] = current_date.year
     df['month'] = current_date.month
     df['weekday'] = current_date.weekday()
 
-    # Define column groups
     categorical_cols = ['municipality']
     binary_cols = ['Балкон / Тераса', 'Лифт', 'Приземје', 'Паркинг простор / Гаража',
                    'Поткровје', 'Нова градба', 'Реновиран', 'Наместен', 'Подрум',
                    'Интерфон', 'Дуплекс']
     numerical_cols = ['area', 'number_of_rooms', 'year', 'month', 'weekday']
 
-    # One-hot encode categorical features
     df_cat = pd.DataFrame(encoder.transform(df[categorical_cols]))
     df_cat.columns = encoder.get_feature_names_out(categorical_cols)
 
-    # Scale numerical features
     df_num = pd.DataFrame(scaler.transform(df[numerical_cols]), columns=numerical_cols)
-
-    # Keep binary columns as is
     df_binary = df[binary_cols].reset_index(drop=True)
 
-    # Combine processed features
     processed_data = pd.concat([df_num, df_cat, df_binary], axis=1)
-
     return processed_data
 
 
-# Exception handler for better error messages
+def calculate_prediction_confidence(model, processed_data, property_data):
+    """
+    Calculate variable confidence metrics based on Random Forest tree predictions
+    This CHANGES for each property based on how consistent the trees are
+    """
+    # Get predictions from all individual trees in the Random Forest
+    tree_predictions = np.array([tree.predict(processed_data)[0]
+                                 for tree in model.estimators_])
+
+    # Calculate statistics
+    mean_pred = tree_predictions.mean()
+    std_pred = tree_predictions.std()
+    min_pred = tree_predictions.min()
+    max_pred = tree_predictions.max()
+
+    # Calculate confidence score (0-100%)
+    # Lower std = higher confidence
+    # Typical std for property prices might be 5000-50000 EUR
+    coefficient_of_variation = (std_pred / mean_pred) * 100 if mean_pred > 0 else 100
+
+    # Confidence score: 100% = very confident, 0% = not confident
+    confidence_score = max(0, 100 - coefficient_of_variation)
+
+    # Confidence level category
+    if confidence_score >= 80:
+        confidence_level = "High"
+    elif confidence_score >= 60:
+        confidence_level = "Medium"
+    else:
+        confidence_level = "Low"
+
+    # Prediction range (using standard deviation)
+    prediction_range_low = mean_pred - std_pred
+    prediction_range_high = mean_pred + std_pred
+
+    return {
+        "confidence_score": round(confidence_score, 2),
+        "confidence_level": confidence_level,
+        "prediction_std_deviation": round(std_pred, 2),
+        "prediction_range": {
+            "low": round(prediction_range_low, 2),
+            "high": round(prediction_range_high, 2),
+            "description": "68% of tree predictions fall within this range"
+        },
+        "tree_predictions_range": {
+            "min": round(min_pred, 2),
+            "max": round(max_pred, 2)
+        },
+        "explanation": f"Based on {len(tree_predictions)} decision trees. {confidence_level} confidence means predictions are {'very consistent' if confidence_score >= 80 else 'somewhat varied' if confidence_score >= 60 else 'highly varied'} across trees."
+    }
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     return JSONResponse(
@@ -257,10 +290,8 @@ async def http_exception_handler(request, exc):
     )
 
 
-# Routes
 @app.get("/", tags=["Root"])
 async def root():
-    """Root endpoint with API information"""
     return {
         "service": "Property Price Prediction API",
         "version": "1.0.0",
@@ -272,7 +303,6 @@ async def root():
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
-    """Health check endpoint"""
     return HealthResponse(
         status="healthy" if all([model, encoder, scaler]) else "unhealthy",
         timestamp=datetime.now().isoformat(),
@@ -285,10 +315,12 @@ async def health_check():
 @app.post("/predict", response_model=PredictionResponse, tags=["Prediction"])
 async def predict_price(property_data: PropertyData):
     """
-    Predict property price based on features
+    Predict property price with variable confidence metrics
 
-    Returns predicted price in EUR with price per square meter.
-    Also includes the model's Mean Absolute Error for accuracy reference.
+    Returns:
+    - predicted_price: The predicted price
+    - prediction_confidence: Variable confidence metrics (changes per request)
+    - model_accuracy: Fixed accuracy metrics from training
     """
 
     if not all([model, encoder, scaler]):
@@ -305,26 +337,40 @@ async def predict_price(property_data: PropertyData):
         predicted_price = model.predict(processed_data)[0]
         price_per_square = predicted_price / property_data.area
 
-        logger.info(
-            f"Prediction: {predicted_price:.2f} EUR for {property_data.area}m² "
-            f"in {property_data.municipality}"
+        # Calculate variable confidence (CHANGES per request)
+        prediction_confidence = calculate_prediction_confidence(
+            model, processed_data, property_data
         )
 
-        # Build response with MAE metrics
+        logger.info(
+            f"Prediction: {predicted_price:.2f} EUR for {property_data.area}m² "
+            f"in {property_data.municipality} (Confidence: {prediction_confidence['confidence_score']}%)"
+        )
+
+        # Fixed model accuracy (from training)
+        model_accuracy = {
+            "mean_absolute_error_eur": model_metrics.get('mean_absolute_error_eur') if model_metrics else None,
+            "mae_percentage": model_metrics.get('mae_percentage') if model_metrics else None,
+            "description": "Average prediction error on test data during training"
+        }
+
         return PredictionResponse(
             predicted_price=round(predicted_price, 2),
             price_per_square_meter=round(price_per_square, 2),
             currency="EUR",
             success=True,
-            # Include MAE metrics if available
-            mean_absolute_error_eur=model_metrics.get('mean_absolute_error_eur') if model_metrics else None,
-            mae_percentage=model_metrics.get('mae_percentage') if model_metrics else None,
+            prediction_confidence=prediction_confidence,  # ← VARIABLE per request
+            model_accuracy=model_accuracy,  # ← FIXED from training
             model_info={
                 "model_type": type(model).__name__,
                 "features_used": len(processed_data.columns),
                 "prediction_timestamp": datetime.now().isoformat(),
-                "service": "FastAPI",
-                "trained_on": model_metrics.get('trained_on') if model_metrics else None
+                "service": "FastAPI"
+            },
+            property_summary={
+                "municipality": property_data.municipality,
+                "area": property_data.area,
+                "rooms": property_data.number_of_rooms
             }
         )
 
@@ -338,12 +384,6 @@ async def predict_price(property_data: PropertyData):
 
 @app.post("/predict/batch", response_model=BatchPredictionResponse, tags=["Prediction"])
 async def predict_batch(batch_data: BatchPropertyData):
-    """
-    Predict prices for multiple properties
-
-    Maximum 100 properties per request
-    """
-
     if not all([model, encoder, scaler]):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -355,10 +395,12 @@ async def predict_batch(batch_data: BatchPropertyData):
 
     for i, property_data in enumerate(batch_data.properties):
         try:
-            # Preprocess and predict
             processed_data = preprocess_property_data(property_data)
             predicted_price = model.predict(processed_data)[0]
             price_per_square = predicted_price / property_data.area
+
+            # Add confidence for each property
+            confidence = calculate_prediction_confidence(model, processed_data, property_data)
 
             results.append({
                 "index": i,
@@ -366,7 +408,9 @@ async def predict_batch(batch_data: BatchPropertyData):
                 "price_per_square_meter": round(price_per_square, 2),
                 "currency": "EUR",
                 "municipality": property_data.municipality,
-                "area": property_data.area
+                "area": property_data.area,
+                "confidence_score": confidence["confidence_score"],
+                "confidence_level": confidence["confidence_level"]
             })
 
         except Exception as e:
@@ -389,7 +433,6 @@ async def predict_batch(batch_data: BatchPropertyData):
         results=results,
         errors=errors,
         timestamp=datetime.now().isoformat(),
-        # Include MAE metrics
         mean_absolute_error_eur=model_metrics.get('mean_absolute_error_eur') if model_metrics else None,
         mae_percentage=model_metrics.get('mae_percentage') if model_metrics else None
     )
@@ -397,8 +440,6 @@ async def predict_batch(batch_data: BatchPropertyData):
 
 @app.get("/model-info", response_model=ModelInfoResponse, tags=["Model"])
 async def get_model_info():
-    """Get information about the loaded model"""
-
     if not all([model, encoder, scaler]):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -414,9 +455,11 @@ async def get_model_info():
             max_depth=getattr(model, 'max_depth', None),
             n_features=getattr(model, 'n_features_in_', None),
             supported_municipalities=supported_municipalities,
-            # Include MAE metrics
             mean_absolute_error_eur=model_metrics.get('mean_absolute_error_eur') if model_metrics else None,
             mae_percentage=model_metrics.get('mae_percentage') if model_metrics else None,
+            trained_on=None,
+            training_samples=None,
+            test_samples=None,
             feature_categories={
                 "categorical": ["municipality"],
                 "numerical": ["area", "number_of_rooms", "year", "month", "weekday"],
@@ -443,8 +486,6 @@ async def get_model_info():
 
 @app.get("/municipalities", tags=["Model"])
 async def get_municipalities():
-    """Get list of supported municipalities"""
-
     if not encoder:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
