@@ -33,17 +33,18 @@ class PropertyData(BaseModel):
     area: float = Field(..., gt=0, description="Property area in square meters")
     number_of_rooms: int = Field(..., ge=1, description="Number of rooms")
 
-    balkon_terasa: int = Field(0, alias="Балкон / Тераса", ge=0, le=1)
-    lift: int = Field(0, alias="Лифт", ge=0, le=1)
-    prizemje: int = Field(0, alias="Приземје", ge=0, le=1)
+    # Binary features (0 or 1) - English property names with Cyrillic aliases
+    balcony: int = Field(0, alias="Балкон / Тераса", ge=0, le=1)
+    elevator: int = Field(0, alias="Лифт", ge=0, le=1)
+    ground_floor: int = Field(0, alias="Приземје", ge=0, le=1)
     parking: int = Field(0, alias="Паркинг простор / Гаража", ge=0, le=1)
-    potkrovje: int = Field(0, alias="Поткровје", ge=0, le=1)
-    nova_gradba: int = Field(0, alias="Нова градба", ge=0, le=1)
-    renoviran: int = Field(0, alias="Реновиран", ge=0, le=1)
-    namesten: int = Field(0, alias="Наместен", ge=0, le=1)
-    podrum: int = Field(0, alias="Подрум", ge=0, le=1)
-    interfon: int = Field(0, alias="Интерфон", ge=0, le=1)
-    dupleks: int = Field(0, alias="Дуплекс", ge=0, le=1)
+    loft: int = Field(0, alias="Поткровје", ge=0, le=1)
+    new_building: int = Field(0, alias="Нова градба", ge=0, le=1)
+    renovated: int = Field(0, alias="Реновиран", ge=0, le=1)
+    furnished: int = Field(0, alias="Наместен", ge=0, le=1)
+    basement: int = Field(0, alias="Подрум", ge=0, le=1)
+    interphone: int = Field(0, alias="Интерфон", ge=0, le=1)
+    duplex: int = Field(0, alias="Дуплекс", ge=0, le=1)
 
     class Config:
         populate_by_name = True
@@ -73,13 +74,8 @@ class PredictionResponse(BaseModel):
     price_per_square_meter: float
     currency: str = "EUR"
     success: bool = True
-
-    # Variable confidence metrics (changes per request)
-    prediction_confidence: Dict[str, Any]  # ← NEW: Variable confidence
-
-    # Fixed model accuracy (from training)
-    model_accuracy: Dict[str, Any]  # ← Renamed from separate fields
-
+    prediction_confidence: Dict[str, Any]
+    model_accuracy: Dict[str, Any]
     model_info: Dict[str, Any]
     property_summary: Optional[Dict[str, Any]] = None
 
@@ -190,17 +186,17 @@ def preprocess_property_data(property_data: PropertyData) -> pd.DataFrame:
         'municipality': property_data.municipality,
         'area': property_data.area,
         'number_of_rooms': property_data.number_of_rooms,
-        'Балкон / Тераса': property_data.balkon_terasa,
-        'Лифт': property_data.lift,
-        'Приземје': property_data.prizemje,
+        'Балкон / Тераса': property_data.balcony,
+        'Лифт': property_data.elevator,
+        'Приземје': property_data.ground_floor,
         'Паркинг простор / Гаража': property_data.parking,
-        'Поткровје': property_data.potkrovje,
-        'Нова градба': property_data.nova_gradba,
-        'Реновиран': property_data.renoviran,
-        'Наместен': property_data.namesten,
-        'Подрум': property_data.podrum,
-        'Интерфон': property_data.interfon,
-        'Дуплекс': property_data.dupleks
+        'Поткровје': property_data.loft,
+        'Нова градба': property_data.new_building,
+        'Реновиран': property_data.renovated,
+        'Наместен': property_data.furnished,
+        'Подрум': property_data.basement,
+        'Интерфон': property_data.interphone,
+        'Дуплекс': property_data.duplex
     }
 
     df = pd.DataFrame([data_dict])
