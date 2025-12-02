@@ -41,6 +41,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Run the application
 # Note: --reload is removed for production. Use it only in development.
-CMD ["python", "-m", "uvicorn", "property-price:app", "--host", "0.0.0.0", "--port", "8081"]
+CMD ["python", "-m", "uvicorn", "property-price:app", "--host", "localhost", "--port", "8081"]
 
 
