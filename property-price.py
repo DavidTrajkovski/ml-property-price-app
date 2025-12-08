@@ -512,7 +512,7 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "app:app",
-        host="localhost",
+        host="127.0.0.1",
         port=port,
         reload=False,
         log_level="info"

@@ -37,10 +37,10 @@ EXPOSE 8081
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8081/health')" || exit 1
+    CMD python -c "import requests; requests.get('http://localhost:127.0.0.1/health')" || exit 1
 
 # Run the application
 # Note: --reload is removed for production. Use it only in development.
-CMD ["python", "-m", "uvicorn", "property-price:app", "--host", "localhost", "--port", "8081"]
+CMD ["python", "-m", "uvicorn", "property-price:app", "--host", "127.0.0.1", "--port", "8081"]
 
 
